@@ -23,6 +23,8 @@ TARGET_URL = "https://shop.royalchallengers.com/ticket"
 WATCH_MATCHES = [
     "Chennai",
     "CSK",
+    "Hyderabad",
+    "SRH"
     # "Mumbai",   # uncomment to also watch RCB vs MI
     # "Kolkata",
 ]
