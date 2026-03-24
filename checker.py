@@ -23,8 +23,6 @@ TARGET_URL = "https://shop.royalchallengers.com/ticket"
 WATCH_MATCHES = [
     "Chennai",
     "CSK",
-    "Hyderabad",
-    "SRH"
     # "Mumbai",   # uncomment to also watch RCB vs MI
     # "Kolkata",
 ]
@@ -38,10 +36,23 @@ STATE_FILE = "/tmp/rcb_seen_matches.json"
 
 # ─── SCRAPER ─────────────────────────────────────────────────────────────────
 
+# All IPL team names to detect match cards in page text
+IPL_TEAMS = [
+    "chennai", "csk",
+    "mumbai", "mi",
+    "kolkata", "kkr",
+    "hyderabad", "srh", "sunrisers",
+    "rajasthan", "rr", "royals",
+    "punjab", "pbks", "kings",
+    "delhi", "dc", "capitals",
+    "lucknow", "lsg", "super giants",
+    "gujarat", "gt", "titans",
+]
+
 async def fetch_ticket_page() -> list[dict]:
     """
     Launches a headless Chromium browser, loads the RCB ticket page,
-    waits for JS to render, and extracts all visible match/ticket cards.
+    waits for JS to render, and extracts all match cards from page text.
     Returns a list of dicts: { title, url, available }
     """
     matches_found = []
@@ -50,7 +61,6 @@ async def fetch_ticket_page() -> list[dict]:
         browser = await p.chromium.launch(headless=True)
         page    = await browser.new_page()
 
-        # Spoof a real user-agent so the site doesn't block headless browsers
         await page.set_extra_http_headers({
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -61,57 +71,54 @@ async def fetch_ticket_page() -> list[dict]:
 
         print(f"[{now()}] Loading {TARGET_URL} ...")
         await page.goto(TARGET_URL, wait_until="networkidle", timeout=30_000)
-
-        # Give JS-heavy frameworks an extra moment to settle
         await page.wait_for_timeout(3000)
 
-        # Dump the full rendered text for debugging if needed
+        # Get full rendered page text
         page_text = await page.inner_text("body")
+        lines = [l.strip() for l in page_text.splitlines() if l.strip()]
 
-        # ── Strategy 1: find <a> tags that look like ticket/match links ──────
-        links = await page.query_selector_all("a[href]")
-        for link in links:
-            href  = await link.get_attribute("href") or ""
-            label = (await link.inner_text()).strip()
-            label = re.sub(r"\s+", " ", label)  # collapse whitespace
+        print(f"[{now()}] DEBUG — full page text lines:")
+        for l in lines:
+            print(f"  >> {l}")
 
-            if not label or len(label) < 4:
-                continue
-            if not any(kw in label.lower() for kw in [
-                "vs", "rcb", "royal challengers", "ticket", "match"
-            ]):
-                continue
+        # Scan lines for team names — collect a window of lines around each hit
+        seen_titles = set()
+        for i, line in enumerate(lines):
+            line_lower = line.lower()
+            # Check if this line mentions a known IPL team
+            if any(team in line_lower for team in IPL_TEAMS):
+                # Grab surrounding context (date, opponent, buy button)
+                window = lines[max(0, i-3):i+4]
+                title  = " vs ".join([
+                    l for l in window
+                    if any(t in l.lower() for t in IPL_TEAMS + ["royal challengers", "rcb"])
+                ])
+                title = re.sub(r"\s+", " ", title).strip()
+                if not title or title in seen_titles:
+                    continue
+                seen_titles.add(title)
 
-            # Detect if the link/button is disabled / sold-out / coming-soon
-            class_attr = (await link.get_attribute("class") or "").lower()
-            aria_label  = (await link.get_attribute("aria-label") or "").lower()
-            combined    = f"{label.lower()} {class_attr} {aria_label}"
+                context = " ".join(window).lower()
+                is_sold_out = any(w in context for w in [
+                    "sold out", "soldout", "coming soon", "notify me", "unavailable"
+                ])
 
-            is_sold_out    = any(w in combined for w in ["sold out", "soldout", "coming soon", "notify me", "disabled", "unavailable"])
-            is_available   = not is_sold_out
+                # Try to find a buy link nearby
+                buy_url = TARGET_URL
+                links = await page.query_selector_all("a[href]")
+                for link in links:
+                    href = await link.get_attribute("href") or ""
+                    txt  = (await link.inner_text()).strip().lower()
+                    if "buy" in txt or "ticket" in txt or "book" in txt:
+                        buy_url = href if href.startswith("http") else f"https://shop.royalchallengers.com{href}"
+                        break
 
-            full_url = href if href.startswith("http") else f"https://shop.royalchallengers.com{href}"
-
-            matches_found.append({
-                "title":     label,
-                "url":       full_url,
-                "available": is_available,
-                "raw":       combined[:120],
-            })
-
-        # ── Strategy 2: fallback — scan raw text blocks for match info ───────
-        if not matches_found:
-            print(f"[{now()}] No link-based cards found, falling back to text scan...")
-            lines = [l.strip() for l in page_text.splitlines() if l.strip()]
-            for i, line in enumerate(lines):
-                if re.search(r"vs\.?\s+\w+|match\s*\d+|IPL\s+\d{4}", line, re.IGNORECASE):
-                    snippet = " | ".join(lines[max(0,i-1):i+3])
-                    matches_found.append({
-                        "title":     line,
-                        "url":       TARGET_URL,
-                        "available": True,   # assume available if shown
-                        "raw":       snippet[:200],
-                    })
+                matches_found.append({
+                    "title":     title or line,
+                    "url":       buy_url,
+                    "available": not is_sold_out,
+                    "raw":       context[:200],
+                })
 
         await browser.close()
 
